@@ -1,0 +1,12 @@
+An error occurred:
+'StrategyAnalyzerApp' object has no attribute 'check_lock_limit'
+Traceback (most recent call last):
+  File "g:\data_analisys\analisys\XQ策略回報分析器\XQ策略回報分析器.py", line 858, in <module>
+    app = StrategyAnalyzerApp(root)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "g:\data_analisys\analisys\XQ策略回報分析器\XQ策略回報分析器.py", line 562, in __init__
+    self.setup_ui()
+  File "g:\data_analisys\analisys\XQ策略回報分析器\XQ策略回報分析器.py", line 625, in setup_ui
+    command=self.check_lock_limit).pack(side=tk.TOP, pady=5, anchor='nw')
+            ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'StrategyAnalyzerApp' object has no attribute 'check_lock_limit'
