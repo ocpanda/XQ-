@@ -219,6 +219,8 @@ class DataProcessor:
         elif file_extension == 'xlsx':
             df = pd.read_excel(file_path, sheet_name='交易分析')
             df['獲利金額'] = df['獲利金額'].str.replace(',', '').astype(float)
+            # 從商品名稱欄位提取商品代碼
+            df['商品代碼'] = df['商品名稱'].str.extract(r'\((.*?)\)')
         else:
             raise ValueError("不支持的文件格式。請使用 CSV 或 XLSX 文件。")
 
@@ -253,12 +255,27 @@ class DataProcessor:
         maximum_order_amount = daily_order_amount.max() if total_trades > 0 else 0
         max_order_date = daily_order_amount.idxmax() if total_trades > 0 else None
 
+        # 計算夏普比率
+        daily_returns = df.groupby('日期')['獲利金額'].sum()
+        returns_mean = daily_returns.mean()
+        returns_std = daily_returns.std()
+        risk_free_rate = 0.02 / 252  # 假設無風險利率為2%
+        sharpe_ratio = (returns_mean - risk_free_rate) / returns_std if returns_std != 0 else 0
+
+        # 計算獲利因子
+        grouped_profits = df.groupby(['日期', '商品代碼'])['獲利金額'].sum()
+        total_wins = grouped_profits[grouped_profits > 0].sum()
+        total_losses = abs(grouped_profits[grouped_profits < 0].sum())
+        profit_factor = total_wins / total_losses if total_losses != 0 else float('inf')
+
         return {
             'total_trades': total_trades,
             'win_trades': win_trades,
             'win_rate': win_rate,
             'average_profit': average_profit,
-            'maximum_order_amount': maximum_order_amount
+            'maximum_order_amount': maximum_order_amount,
+            'sharpe_ratio': sharpe_ratio,
+            'profit_factor': profit_factor
         }
 
     @staticmethod
@@ -482,6 +499,203 @@ class ChartPlotter:
         self.stats_text = fig.text(0.77, 0.5, stats_text, va='center', fontsize=10)
         self._add_returns_hover_effect(fig, ax1, ax2)
 
+        return fig
+    
+    def plot_monte_carlo_simulation(self, trading_data, n_simulations=3000):
+        """
+        繪製蒙地卡羅模擬圖表
+        
+        Args:
+            trading_data (dict): 策略交易數據
+            n_simulations (int): 模擬次數
+        """
+        # 創建一個2行2列的子圖布局
+        fig = plt.figure(figsize=(12, 15))
+        gs = fig.add_gridspec(2, 2, height_ratios=[1, 0.8], width_ratios=[1, 1], right=0.8)
+        
+        ax1 = fig.add_subplot(gs[0, :])  # 第一行佔滿
+        ax2 = fig.add_subplot(gs[1, 0])  # 第二行左側
+        ax3 = fig.add_subplot(gs[1, 1])  # 第二行右側
+        
+        plt.subplots_adjust(hspace=0.4, right=0.85, top=0.95)
+
+        # 合併所有策略的每日收益並補上缺失日期
+        all_dates = pd.date_range(start=min(trading_data[list(trading_data.keys())[0]].index),
+                                end=max(trading_data[list(trading_data.keys())[0]].index),
+                                freq='B')
+        combined_returns = pd.DataFrame(trading_data).reindex(all_dates, fill_value=0).sum(axis=1)
+        
+        # 計算每日收益率的統計特徵 (使用全部數據)
+        daily_mean = combined_returns.mean()
+        daily_std = combined_returns.std()
+        
+        # 只取最近一年的數據用於繪圖
+        last_date = combined_returns.index.max()
+        plot_start_date = last_date - pd.DateOffset(years=1)
+        plot_returns = combined_returns[combined_returns.index >= plot_start_date]
+        plot_dates = plot_returns.index
+        
+        # 設定模擬天數 (一年歷史 + 三年預測)
+        n_plot_days = len(plot_returns) + (252 * 3)
+        
+        # 進行蒙特卡羅模擬
+        simulations = np.zeros((n_simulations, n_plot_days))
+        drawdowns = np.zeros((n_simulations, n_plot_days))
+        max_drawdowns = np.zeros(n_simulations)
+        
+        # 填充最近一年的歷史數據
+        historical_cumsum = plot_returns.cumsum().values
+        simulations[:, :len(historical_cumsum)] = historical_cumsum
+        
+        # 從最後一個歷史點開始模擬
+        for i in range(n_simulations):
+            random_returns = np.random.normal(daily_mean, daily_std, n_plot_days - len(historical_cumsum))
+            simulations[i, len(historical_cumsum):] = simulations[i, len(historical_cumsum)-1] + np.cumsum(random_returns)
+            
+            # 計算回撤
+            peak = np.maximum.accumulate(simulations[i])
+            drawdowns[i] = simulations[i] - peak
+            max_drawdowns[i] = np.min(drawdowns[i])
+        
+        dd_std = np.std(drawdowns, axis=0)
+        mdd_std = np.std(max_drawdowns)
+        
+        # 計算未來路徑的置信區間
+        future_start = len(historical_cumsum) - 1
+        percentile_5 = np.percentile(simulations[:, future_start:], 5, axis=0)
+        percentile_95 = np.percentile(simulations[:, future_start:], 95, axis=0)
+        median_line = np.median(simulations[:, future_start:], axis=0)
+        
+        # 創建未來日期
+        future_dates = pd.date_range(start=plot_dates[-1], 
+                                periods=n_plot_days-len(historical_cumsum)+1, 
+                                freq='B')[1:]
+        
+        # 繪製歷史數據
+        ax1.plot(plot_dates, historical_cumsum, 
+                color='red', linewidth=2, label='歷史實際走勢')
+        
+        # 繪製未來模擬路徑
+        for i in range(min(250, n_simulations)):
+            ax1.plot(future_dates, simulations[i, future_start+1:], alpha=0.1, color='gray')
+        
+        # 繪製未來置信區間
+        ax1.fill_between(future_dates, percentile_5[1:], percentile_95[1:], 
+                        color='lightblue', alpha=0.3, label='90% 置信區間')
+        ax1.plot(future_dates, median_line[1:], color='blue', 
+                linewidth=2, label='中位數路徑')
+        
+        # 設置 x 軸格式
+        ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+        
+        ax1.set_title('蒙地卡羅模擬 - 累積報酬走勢')
+        ax1.set_xlabel('日期')
+        ax1.set_ylabel('累積報酬')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: format(int(x), ',')))
+        
+        # 繪製每日報酬分布 (使用全部數據)
+        daily_returns = np.diff(simulations, axis=1)
+        daily_returns_flat = daily_returns.flatten()
+        ax2.hist(daily_returns_flat, bins=50, density=True, alpha=0.7, color='lightblue')
+        ax2.axvline(np.median(daily_returns_flat), color='red', linestyle='--', label='中位數')
+        ax2.axvline(np.percentile(daily_returns_flat, 5), color='orange', linestyle='--', label='5%分位數')
+        ax2.axvline(np.percentile(daily_returns_flat, 95), color='orange', linestyle='--', label='95%分位數')
+        
+        ax2.set_title('每日報酬分布')
+        ax2.set_xlabel('每日報酬')
+        ax2.set_ylabel('密度')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 繪製回撤分布 (使用全部數據)
+        drawdowns_flat = drawdowns.flatten()
+        ax3.hist(drawdowns_flat, bins=50, density=True, alpha=0.7, color='lightblue')
+        ax3.axvline(np.median(drawdowns_flat), color='red', linestyle='--', label='中位數')
+        ax3.axvline(np.percentile(drawdowns_flat, 5), color='orange', linestyle='--', label='5%分位數')
+        ax3.axvline(np.percentile(drawdowns_flat, 95), color='orange', linestyle='--', label='95%分位數')
+        
+        ax3.set_title('DD分布')
+        ax3.set_xlabel('DD值')
+        ax3.set_ylabel('密度')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        # 計算模擬相關的統計數據
+        final_returns = simulations[:,-1]
+        # 計算不同信賴區間的 MDD
+        mdd_95 = np.percentile(max_drawdowns, 5)  # 95% 信賴區間的 MDD (較差的5%情況)
+        mdd_90 = np.percentile(max_drawdowns, 10)  # 90% 信賴區間的 MDD
+        mdd_50 = np.median(max_drawdowns)  # 中位數 MDD
+        worst_mdd = np.min(max_drawdowns)  # 最差 MDD
+
+        # 計算年化報酬率 (假設252個交易日)
+        final_values = simulations[:,-1]
+        days_simulated = n_plot_days - len(historical_cumsum)  # 模擬的天數
+        annual_returns = (final_values / simulations[:,future_start].reshape(-1, 1) - 1) * (252 / days_simulated)
+        median_annual_return = np.median(annual_returns)
+        
+        # 計算日獲利的不同信賴區間
+        daily_returns_95 = np.percentile(daily_returns_flat, 95)  # 95% 信賴區間的日獲利
+        daily_returns_90 = np.percentile(daily_returns_flat, 90)  # 90% 信賴區間的日獲利
+        daily_returns_50 = np.median(daily_returns_flat)  # 中位數日獲利
+        daily_returns_extreme = np.max(np.abs(daily_returns_flat))  # 最極端的日獲利
+
+        # 計算DD的不同信賴區間
+        dd_95 = np.percentile(drawdowns_flat, 5)  # 95% 信賴區間的DD
+        dd_90 = np.percentile(drawdowns_flat, 10)  # 90% 信賴區間的DD 
+        dd_50 = np.median(drawdowns_flat)  # 中位數DD
+        worst_dd = np.min(drawdowns_flat)  # 最差DD
+
+        # 計算不同信賴區間的勝率
+        win_rate_95 = np.mean(daily_returns_flat > 0)  # 整體勝率
+        win_rate_90 = np.mean(daily_returns_flat[np.abs(daily_returns_flat) > np.percentile(np.abs(daily_returns_flat), 10)] > 0)  # 90%信賴區間勝率
+        win_rate_50 = np.mean(daily_returns_flat[np.abs(daily_returns_flat) > np.median(np.abs(daily_returns_flat))] > 0)  # 中位數以上勝率
+        
+        # 添加統計信息
+        stats_text = (
+            f'蒙地卡羅模擬結果:\n'
+            f'模擬次數: {n_simulations}\n'
+            f'模擬期間: {days_simulated}天\n'
+            f'\n'
+            f'報酬預測:\n'
+            f'中位數年化報酬: {median_annual_return:.2%}\n'
+            f'中位數累積報酬: {np.median(final_returns):,.0f}\n'
+            f'最佳情況(95%): {np.percentile(final_returns, 95):,.0f}\n'
+            f'最差情況(5%): {np.percentile(final_returns, 5):,.0f}\n'
+            f'\n'
+            f'預測風險指標:\n'
+            f'95%信賴區間勝率: {win_rate_95:.2%}\n'
+            f'90%信賴區間勝率: {win_rate_90:.2%}\n'
+            f'中位數勝率: {win_rate_50:.2%}\n'
+            f'\n'
+            f'最極端日獲利: {daily_returns_extreme:,.0f}\n'
+            f'95%信賴區間的日獲利: {daily_returns_95:,.0f}\n'
+            f'90%信賴區間的日獲利: {daily_returns_90:,.0f}\n'
+            f'中位數日獲利: {daily_returns_50:,.0f}\n'
+            f'\n'
+            f'最極端DD: {worst_dd:,.0f}\n'
+            f'95%信賴區間的DD: {dd_95:,.0f}\n'
+            f'90%信賴區間的DD: {dd_90:,.0f}\n'
+            f'中位數DD: {dd_50:,.0f}\n'
+            f'\n'
+            f'最極端MDD: {worst_mdd:,.0f}\n'
+            f'95%信賴區間的MDD: {mdd_95:,.0f}\n'
+            f'90%信賴區間的MDD: {mdd_90:,.0f}\n'
+            f'中位數MDD: {mdd_50:,.0f}\n'
+            f'\n'
+            f'預測波動指標:\n'
+            f'日均報酬: {daily_mean:,.0f}\n'
+            f'日均標準差: {daily_std:,.0f}\n'
+            f'DD標準差: {np.mean(dd_std):,.0f}\n'
+            f'MDD標準差: {mdd_std:,.0f}'
+        )
+        
+        plt.figtext(0.82, 0.15, stats_text, fontsize=10, va='bottom')
+        
         return fig
 
     # ========== Helper Methods ========== #
@@ -720,6 +934,8 @@ class ChartPlotter:
             f"總交易次數: {combined_stats['total_trades']}",
             f"勝率: {combined_stats['win_rate']:.2%}",
             f"平均獲利: {combined_stats['average_profit']:.2f}",
+            f"夏普比率: {combined_stats['sharpe_ratio']:.2f}",
+            f"獲利因子: {combined_stats['profit_factor']:.2f}",
             f"最大下單金額: {combined_stats['maximum_order_amount']:.0f}",
             f"MDD: {-combined_max_dd.iloc[-1]:.0f}",
             ""
@@ -731,9 +947,10 @@ class ChartPlotter:
                 f"總交易次數: {stats['stats']['total_trades']}",
                 f"勝率: {stats['stats']['win_rate']:.2%}",
                 f"平均獲利: {stats['stats']['average_profit']:.2f}",
-                f"最大下單金額: {stats['stats']['maximum_order_amount']:.0f}",
+                f"夏普比率: {stats['stats']['sharpe_ratio']:.2f}",
+                f"獲利因子: {stats['stats']['profit_factor']:.2f}",
+                f"最大下單金額: {stats['stats']['maximum_order_amount']:.0f}", 
                 f"MDD: {-stats['max_dd'].iloc[-1]:.0f}",
-                ""
             ])
 
         return '\n'.join(stats_text_list)
@@ -786,12 +1003,19 @@ class StrategyAnalyzerApp:
         # Changelog 相關
         self.changelog_text = None
         self.changelog_content = """
-            Powered by ocpanda at https://github.com/ocpanda
+            開發者：ocpanda https://github.com/ocpanda
+            GitHub 專案頁面：https://github.com/ocpanda/XQExecAnalyzer
             如果對此軟體有任何建議或錯誤回報，歡迎到 GitHub 上提出 issue。
             喜歡的話，可以給顆星星，謝謝！
 
             版本更新記錄：
 
+            v0.5.0 (2024-11-04)
+            Features:
+            - 新增獲利因子計算
+            - 新增夏普比率計算
+            - 新增蒙地卡羅模擬
+            
             v0.4.0 (2024-11-03)
             Features:
             - 新增選擇重複商品欲優先執行策略功能
@@ -853,6 +1077,8 @@ class StrategyAnalyzerApp:
                   command=self.show_daily_returns).pack(side=tk.TOP, pady=5, anchor='nw')
         tk.Button(self.button_frame, text="顯示月獲利",
                   command=self.show_monthly_returns).pack(side=tk.TOP, pady=5, anchor='nw')
+        tk.Button(self.button_frame, text="蒙地卡羅模擬",
+                  command=self.show_monte_carlo_simulation).pack(side=tk.TOP, pady=5, anchor='nw')
 
         tk.Button(self.button_frame, text="匯入報表",
                   command=self.import_reports).pack(side=tk.BOTTOM, ipady=15, anchor='sw')
@@ -1064,7 +1290,15 @@ class StrategyAnalyzerApp:
 
         tk.Button(config_frame, text="儲存設定", command=save_config).grid(row=6, column=0, columnspan=2, pady=20)
 
+    def show_monte_carlo_simulation(self):
+        self._clear_canvas()
+        if not self.trading_data:
+            print("尚未匯入任何報表。")
+            return
         
+        self._clear_date_frame()
+        fig = self.chart_plotter.plot_monte_carlo_simulation(self.trading_data)
+        self._update_canvas(fig)
 
     def show_cumulative_returns(self):
         self._clear_canvas()
