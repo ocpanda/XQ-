@@ -218,11 +218,16 @@ class DataProcessor:
             df = pd.read_csv(file_path, encoding='ansi')
         elif file_extension == 'xlsx':
             df = pd.read_excel(file_path, sheet_name='交易分析')
-            df['獲利金額'] = df['獲利金額'].str.replace(',', '').astype(float)
+            if '獲利金額' in df.columns:
+                df['獲利金額'] = df['獲利金額'].str.replace(',', '').astype(float)
             # 從商品名稱欄位提取商品代碼
             df['商品代碼'] = df['商品名稱'].str.extract(r'\((.*?)\)')
         else:
             raise ValueError("不支持的文件格式。請使用 CSV 或 XLSX 文件。")
+    
+        # 如果沒有交易數量欄位則新增並設為1
+        if '交易數量' not in df.columns:
+            df['交易數量'] = 1
 
         df['進場時間'] = pd.to_datetime(df['進場時間'], format='%Y/%m/%d %H:%M')
         df['出場時間'] = pd.to_datetime(df['出場時間'], format='%Y/%m/%d %H:%M')
@@ -501,11 +506,12 @@ class ChartPlotter:
 
         return fig
     
-    def plot_monte_carlo_simulation(self, trading_data, n_simulations=3000):
+    def plot_monte_carlo_simulation(self, strategy_stats, trading_data, n_simulations=3000):
         """
         繪製蒙地卡羅模擬圖表
         
         Args:
+            strategy_stats (dict): 策略交易數據
             trading_data (dict): 策略交易數據
             n_simulations (int): 模擬次數
         """
@@ -523,6 +529,7 @@ class ChartPlotter:
         all_dates = pd.date_range(start=min(trading_data[list(trading_data.keys())[0]].index),
                                 end=max(trading_data[list(trading_data.keys())[0]].index),
                                 freq='B')
+
         combined_returns = pd.DataFrame(trading_data).reindex(all_dates, fill_value=0).sum(axis=1)
         
         # 計算每日收益率的統計特徵 (使用全部數據)
@@ -749,7 +756,7 @@ class ChartPlotter:
                 return
 
             x_pos = event.xdata
-            month_index = int(x_pos + 0.5)
+            month_index = math.floor(x_pos + 0.1)
 
             for text in ax1.texts:
                 text.remove()
@@ -758,7 +765,7 @@ class ChartPlotter:
 
             for bar_index, bar in enumerate(bars):
                 bar_x = bar.get_x()
-                bar_month = int(bar_x + 0.5)
+                bar_month = math.floor(bar_x + 0.1)
 
                 if bar_month == month_index:
                     if not hasattr(bar, 'original_height'):
@@ -814,7 +821,7 @@ class ChartPlotter:
                 return
 
             x_pos = event.xdata
-            day_index = int(x_pos + 0.5)
+            day_index = math.floor(x_pos + 0.1)
 
             for text in ax1.texts:
                 text.remove()
@@ -823,7 +830,7 @@ class ChartPlotter:
 
             for bar_index, bar in enumerate(bars):
                 bar_x = bar.get_x()
-                bar_day = int(bar_x + 0.5)
+                bar_day = math.floor(bar_x + 0.1)
 
                 if bar_day == day_index:
                     if not hasattr(bar, 'original_height'):
@@ -1009,6 +1016,17 @@ class StrategyAnalyzerApp:
             喜歡的話，可以給顆星星，謝謝！
 
             版本更新記錄：
+
+            v0.5.2 (2024-11-24)
+            Bug Fixes:
+            - 修正匯入選股回測報表時發生錯誤的問題
+
+            v0.5.1 (2024-11-05)
+            Features:
+            - 調整蒙地卡羅模擬顯示資訊
+            Bug Fixes:
+            - 修正日獲利圖表滑鼠十字線顯示錯誤
+            - 修正月獲利圖表滑鼠十字線顯示錯誤
 
             v0.5.0 (2024-11-04)
             Features:
@@ -1295,9 +1313,9 @@ class StrategyAnalyzerApp:
         if not self.trading_data:
             print("尚未匯入任何報表。")
             return
-        
+
         self._clear_date_frame()
-        fig = self.chart_plotter.plot_monte_carlo_simulation(self.trading_data)
+        fig = self.chart_plotter.plot_monte_carlo_simulation(self.strategy_stats, self.trading_data)
         self._update_canvas(fig)
 
     def show_cumulative_returns(self):
